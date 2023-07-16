@@ -86,6 +86,8 @@ app.post('/stripe', express.raw({ type: 'application/json' }), async (req, res) 
         const record = await createNocoDBRow(PAYMENTS_TABLE, payment);
         console.log("Created payment record: ", record.Id);
     }
+
+    return res.send();
 })
 
 app.listen(3000, () => {
