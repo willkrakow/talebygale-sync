@@ -3,8 +3,8 @@ import path from 'path';
 import express from 'express';
 import cors from 'cors';
 import { GhostUpdateWebhookPayload, NewNocoDBRow, NocoDBJob, NocoDBPayment, NocoDBRowBase } from './types';
-import { JOBS_TABLE, PAYMENTS_TABLE, createNocoDBRow, getJobPostCompany, getJobPostLink, getJobPostRemote, getNocoDBRowByGhostId, updateNocoDBRow } from './utils';
-import { stripe, stripeWebhookSecret } from './services';
+import { JOBS_TABLE, PAYMENTS_TABLE, createNocoDBRow, getJobPostCompany, getJobPostLink, getJobPostLocation, getJobPostRemote, getNocoDBRowByGhostId, updateNocoDBRow } from './utils';
+import { contentClient, stripe, stripeWebhookSecret } from './services';
 import Stripe from 'stripe';
 
 dotenv.config({
@@ -24,21 +24,49 @@ app.post('/ghost/post/updated', express.json(), async (req, res) => {
     console.log(data);
     try {
         const nocoRecord = await getNocoDBRowByGhostId<NocoDBJob>(JOBS_TABLE, data.post.current.id);
-        const updatedRecord: Partial<NocoDBJob> = {
-            Id: nocoRecord.Id,
-            Title: data.post.current.title,
-            Available: data.post.current.status === "published",
-            Company: getJobPostCompany(data.post.current) || "",
-            JobURL: getJobPostLink(data.post.current) || "",
-            Slug: data.post.current.slug,
-            GhostId: data.post.current.id,
-            GhostURL: data.post.current.url,
-            GhostPublishedAt: data.post.current.published_at,
-            Description: data.post.current.excerpt,
-            Remote: getJobPostRemote(data.post.current),
+        if (!nocoRecord) {
+            console.log("No noco record found for ghost post: ", data.post.current.id);
+            let location = "";
+            if (data.post.current.status === "published"){
+                location = getJobPostLocation(data.post.current);
+            }
+            const newRecord: NewNocoDBRow<NocoDBJob> = {
+                Title: data.post.current.title,
+                Available: data.post.current.status === "published",
+                Company: getJobPostCompany(data.post.current) || "",
+                JobURL: getJobPostLink(data.post.current) || "",
+                Slug: data.post.current.slug,
+                GhostId: data.post.current.id,
+                GhostURL: data.post.current.url,
+                GhostPublishedAt: data.post.current.published_at,
+                Description: data.post.current.excerpt,
+                Remote: getJobPostRemote(data.post.current),
+                CompanyURL: "",
+                Location: location,
+                SalaryHigh: 0,
+                SalaryLow: 0,
+            };
+            await createNocoDBRow(JOBS_TABLE, newRecord as NocoDBJob);
+            console.log("Created new noco record for ghost post: ", data.post.current.id);
+        } else {
+            const updatedRecord: Partial<NocoDBJob> = {
+                Id: nocoRecord.Id,
+                Title: data.post.current.title,
+                Available: data.post.current.status === "published",
+                Company: getJobPostCompany(data.post.current) || "",
+                JobURL: getJobPostLink(data.post.current) || "",
+                Slug: data.post.current.slug,
+                GhostId: data.post.current.id,
+                GhostURL: data.post.current.url,
+                GhostPublishedAt: data.post.current.published_at,
+                Description: data.post.current.excerpt,
+                Remote: getJobPostRemote(data.post.current),
+            }
+            await updateNocoDBRow(JOBS_TABLE, updatedRecord as NocoDBJob);
+            console.log("Updated noco record for ghost post: ", data.post.current.id);
         }
 
-        await updateNocoDBRow(JOBS_TABLE, updatedRecord as NocoDBJob);
+        res.send();
     } catch(e){
         console.error(e);
     }
