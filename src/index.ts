@@ -4,7 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import { GhostUpdateWebhookPayload, NewNocoDBRow, NocoDBJob, NocoDBPayment, NocoDBRowBase } from './types';
 import { JOBS_TABLE, PAYMENTS_TABLE, createNocoDBRow, getJobPostCompany, getJobPostLink, getJobPostRemote, getNocoDBRowByGhostId, updateNocoDBRow } from './utils';
-import { stripe } from './services';
+import { stripe, stripeWebhookSecret } from './services';
 import Stripe from 'stripe';
 
 dotenv.config({
@@ -49,7 +49,7 @@ app.post('/stripe', express.raw({ type: 'application/json' }), async (req, res) 
     let event;
     
     try {
-        event = stripe.webhooks.constructEvent(req.body, sig as string, process.env.STRIPE_WEBHOOK_SECRET as string);
+        event = stripe.webhooks.constructEvent(req.body, sig as string, stripeWebhookSecret as string);
         console.log("Received stripe event: ", event.type)
     } catch (err) {
         console.log(err);
