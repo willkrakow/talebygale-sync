@@ -1,78 +1,93 @@
-import { NocoDBPost } from './types';
-import { comparePostHashes, unifyPost } from './hashing';
-import { client, contentClient, db } from './services';
+import dotenv from 'dotenv';
+import path from 'path';
+import express from 'express';
+import cors from 'cors';
+import { GhostUpdateWebhookPayload, NewNocoDBRow, NocoDBJob, NocoDBPayment, NocoDBRowBase } from './types';
+import { JOBS_TABLE, PAYMENTS_TABLE, createNocoDBRow, getJobPostCompany, getJobPostLink, getJobPostRemote, getNocoDBRowByGhostId, updateNocoDBRow } from './utils';
+import { stripe } from './services';
+import Stripe from 'stripe';
 
+dotenv.config({
+    path: path.resolve(__dirname, '../.env')
+});
 
-async function getGhostPosts() {
-    return client.posts.browse({ limit: 1000, include: "tags" });
-}
+const app = express();
+app.use(cors());
 
-async function getNocoDBPosts() {
-    const { list } = await db.dbTableRow.list(process.env.NOCO_ORG!, process.env.NOCO_PROJECT!, '');
-    return list as NocoDBPost[];
-}
+app.get('/', (req, res) => {
+    res.json({ status: "ok" })
+})
 
-async function main() {
-    const ghostPosts = await getGhostPosts();
-    const nocoDBPosts = await getNocoDBPosts();
-    const ghostPostIds = ghostPosts.map(p => p.id);
-    const nocoDBPostIds = nocoDBPosts.map(p => p.id);
-    const missingPosts = nocoDBPosts.filter(p => !ghostPostIds.includes(p.id));
-    const extraPosts = ghostPosts.filter(p => !nocoDBPostIds.includes(p.id));
-    console.log("Missing posts", missingPosts.length);
-    console.log("Extra posts", extraPosts.length);
-
-    for await (const post of missingPosts) {
-        await db.dbTableRow.delete(process.env.NOCO_ORG!, process.env.NOCO_PROJECT!, '', post.id);
-        console.info("Deleted post", post.id);
-    }
-
-    for await (const post of extraPosts) {
-        const postContent = await contentClient.posts.read({ id: post.id });
-
-        await db.dbTableRow.create(process.env.NOCO_ORG!, process.env.NOCO_PROJECT!, '', unifyPost(post, postContent));
-        console.info("Created post", post.id);
-    }
-
-    for await (const post of ghostPosts) {
-        const postContent = await contentClient.posts.read({ id: post.id });
-        const nocoPost = nocoDBPosts.find(p => p.id === post.id);
-        if (!nocoPost) {
-            console.log("No post found in NocoDB for", post.id);
-            continue;
+app.post('/ghost/post/updated', express.json(), async (req, res) => {
+    const data = req.body as GhostUpdateWebhookPayload;
+    console.log(req.path);
+    console.log(data);
+    try {
+        const nocoRecord = await getNocoDBRowByGhostId<NocoDBJob>(JOBS_TABLE, data.post.current.id);
+        const updatedRecord: Partial<NocoDBJob> = {
+            Id: nocoRecord.Id,
+            Title: data.post.current.title,
+            Available: data.post.current.status === "published",
+            Company: getJobPostCompany(data.post.current) || "",
+            JobURL: getJobPostLink(data.post.current) || "",
+            Slug: data.post.current.slug,
+            GhostId: data.post.current.id,
+            GhostURL: data.post.current.url,
+            GhostPublishedAt: data.post.current.published_at,
+            Description: data.post.current.excerpt,
+            Remote: getJobPostRemote(data.post.current),
         }
 
-        const truePost = unifyPost(post, postContent);
-        if (!comparePostHashes(truePost, nocoPost)) {
-            const rowLastUpdated = new Date(nocoPost.updated_at);
-            const postLastUpdated = new Date(post.updated_at);
-
-            // Whichever has been updated most recently, update the other
-            if (rowLastUpdated > postLastUpdated) {
-                // Update Ghost
-                await client.posts.edit({
-                    id: post.id,
-                    title: nocoPost.title,
-                    slug: nocoPost.slug,
-                    excerpt: nocoPost.excerpt,
-                    meta_title: nocoPost.meta_title as string,
-                    meta_description: nocoPost.meta_description as string,
-                    tags: nocoPost.tags as string[],
-                    status: nocoPost.status as string,
-                    updated_at: rowLastUpdated.toISOString(),
-                });
-                console.info("Updated Ghost post", post.id);
-            }
-            else {
-                // Update NocoDB
-                await db.dbTableRow.update(process.env.NOCO_ORG!, process.env.NOCO_PROJECT!, '', post.id, truePost);
-                console.info("Updated NocoDB post", post.id);
-            }
-        }
+        await updateNocoDBRow(JOBS_TABLE, updatedRecord as NocoDBJob);
+    } catch(e){
+        console.error(e);
     }
-}
+})
 
-main()
-    .then(() => console.log("Sync complete"))
-    .catch(e => console.error(e))
-    .finally(() => process.exit(0));
+app.post('/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    let event;
+    
+    try {
+        event = stripe.webhooks.constructEvent(req.body, sig as string, process.env.STRIPE_WEBHOOK_SECRET as string);
+        console.log("Received stripe event: ", event.type)
+    } catch (err) {
+        console.log(err);
+        return res.status(400).send(`Webhook Error`);
+    }
+
+    if (event.type === 'payment_intent.succeeded'){
+        const session = event.data.object as Stripe.PaymentIntent;
+        let customerName = session.customer;
+        if (typeof session.customer === "object" && session.customer !== null){
+            customerName = session.customer.object;
+        }
+        let customerEmail: string | null;
+        if (typeof session.customer !== "string" && session.customer !== null){
+            customerEmail = (session.customer as Stripe.Customer).email;
+        } else if (session.receipt_email){
+            customerEmail = session.receipt_email;
+        } else if (session.metadata.email){
+            customerEmail = session.metadata.email;
+        } else {
+            customerEmail = null;
+        }
+
+        const payment: NewNocoDBRow<NocoDBPayment> = {
+            StripeId: session.id,
+            Amount: session.amount,
+            CustomerEmail: customerEmail || "",
+            CustomerName: customerName as string || "",
+            CustomerTikTok: session.metadata.tiktok || "",
+            StripeStatus: session.status,
+            StripeCreatedAt: new Date(session.created * 1000).toISOString(),
+        }
+
+        const record = await createNocoDBRow(PAYMENTS_TABLE, payment);
+        console.log("Created payment record: ", record.Id);
+    }
+})
+
+app.listen(3000, () => {
+    console.log("Listening on port 3000");
+});

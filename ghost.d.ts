@@ -1,4 +1,13 @@
 declare module "@tryghost/admin-api" {
+    interface GhostPostAdminTag {
+        id: string;
+        name: string;
+        slug: string;
+        description: string;
+        url: string;
+        created_at: string;
+        updated_at: string;
+    }
     interface GhostPost {
         id: string;
         title: string;
@@ -14,7 +23,7 @@ declare module "@tryghost/admin-api" {
         codeinjection_foot: string;
         custom_template: string;
         canonical_url: string;
-        tags: string[];
+        tags: GhostPostAdminTag[];
         authors: string[];
         primary_author: string;
         primary_tag: string;
